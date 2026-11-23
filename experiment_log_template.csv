@@ -1,0 +1,1 @@
+system_id,laptop_model,gpu_model,gpu_tgp_w,vram_gb,cpu_model,ram_gb,os,driver_version,pytorch_version,cuda_runtime,power_mode,ac_power,ambient_temp_c,mode,fixed_batch_size,max_batch_size,max_wait_ms,concurrency,requests,repetition,notes
