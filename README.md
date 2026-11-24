@@ -2,7 +2,7 @@
 
 An asynchronous, GPU-accelerated deep learning inference server designed to maximize throughput and optimize GPU resource utilization using dynamic request batching.
 
-> **Academic Disclaimer**: This software is an experimental prototype developed as an undergraduate academic study for *Deep Learning with Accelerated Computing*. It demonstrates the empirical trade-offs between batching delay, queue latency, and GPU throughput. It is not presented as an established publication-ready novel scheduling architecture. Realized performance metrics depend heavily on the target hardware, Total Graphics Power (TGP) constraints, PyTorch/CUDA versions, and workload arrival patterns.
+
 
 ---
 
