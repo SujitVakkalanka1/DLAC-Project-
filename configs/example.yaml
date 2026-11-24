@@ -1,0 +1,17 @@
+# Configuration for Dynamic Batching-Based High-Throughput Image Inference Server
+server:
+  host: "127.0.0.1"
+  port: 8000
+  workers: 1
+
+batching:
+  mode: "adaptive"            # Batching policy: 'none', 'fixed', or 'adaptive'
+  fixed_batch_size: 8         # Batch target size for 'fixed' mode
+  max_batch_size: 16          # Maximum batch capacity limit
+  max_wait_ms: 20.0           # Maximum batching accumulation delay in milliseconds
+  max_queue_size: 512         # Maximum async request queue capacity
+
+model:
+  name: "resnet18"
+  device: "cuda:0"            # Target device: "cuda:0" or "cpu"
+  max_content_length_mb: 10   # Maximum allowed upload payload size in MB

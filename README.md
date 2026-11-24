@@ -1,90 +1,259 @@
-# GPU Adaptive Batching — Reproducible Two-Laptop Study
+# Dynamic Batching-Based High-Throughput Image Inference Server
 
-This is a complete **experimental prototype**, not a validated novel research contribution. It compares no batching, fixed batching and a simple queue-length adaptive heuristic on an NVIDIA CUDA GPU. Run the same software and procedure on each laptop.
+An asynchronous, GPU-accelerated deep learning inference server designed to maximize throughput and optimize GPU resource utilization using dynamic request batching.
 
-## 1. Prerequisites (Windows 10/11)
-- NVIDIA laptop GPU with working drivers (RTX 4060/5060)
-- Python 3.11, VS Code or PowerShell, internet on first run to download pretrained ResNet-18 weights
-- AC power, consistent performance mode, adequate ventilation
-- Use **one** Uvicorn worker, no `--reload`, because the process owns the GPU and queue.
+> **Academic Disclaimer**: This software is an experimental prototype developed as an undergraduate academic study for *Deep Learning with Accelerated Computing*. It demonstrates the empirical trade-offs between batching delay, queue latency, and GPU throughput. It is not presented as an established publication-ready novel scheduling architecture. Realized performance metrics depend heavily on the target hardware, Total Graphics Power (TGP) constraints, PyTorch/CUDA versions, and workload arrival patterns.
 
-## 2. Install on BOTH machines
-Open PowerShell in the extracted folder:
+---
 
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+## 1. Project Overview & Problem Statement
+
+Deploying deep learning vision backbones in interactive environments presents a fundamental tension between **latency** and **throughput**:
+- **Sequential Execution (`batch_size=1`)**: Provides low latency for isolated requests but severely underutilizes modern GPU tensor cores, resulting in poor saturated throughput.
+- **Static Large Batching**: Saturates GPU compute units efficiently but introduces unacceptable queuing delays for early-arriving requests during sparse traffic.
+
+This project implements an asynchronous serving architecture in Python, FastAPI, and PyTorch that buffers incoming inference requests in an asynchronous queue and evaluates three batch scheduling policies:
+1. **`none` (Sequential)**: Processes requests one by one.
+2. **`fixed` (Static Dynamic Batching)**: Accumulates requests up to a static batch size or until a maximum waiting time expires.
+3. **`adaptive` (Queue-Pressure Dynamic Batching)**: Dynamically scales batch targets based on instantaneous queue pressure to balance latency at low loads and throughput at high loads.
+
+---
+
+## 2. Objectives and Scope
+
+- **Asynchronous Front-End**: Ingest concurrent HTTP multipart image requests without blocking the inference engine.
+- **Dynamic Batch Aggregation**: Implement queue-draining algorithms that group requests into batches without starving waiting requests.
+- **Accurate Profiling**: Dissect end-to-end client latency into HTTP/preprocessing delay, server queue waiting time, and device-side CUDA kernel execution time.
+- **Hardware Benchmarking**: Benchmark comparative performance on laptop GPUs (such as the NVIDIA RTX 4060 Laptop GPU and RTX 5060 Laptop GPU) across a sweep of concurrency levels.
+
+---
+
+## 3. Architecture & Request Workflow
+
+```mermaid
+flowchart TD
+    Client["Client Workload Generator (benchmarks/benchmark.py)"] -->|POST /predict| API["FastAPI Endpoint (src/app.py)"]
+    API -->|Async CPU Decode| Preproc["Image Preprocessing (asyncio.to_thread)"]
+    Preproc -->|Preprocessed Tensor| Queue["Async Request Queue (asyncio.Queue)"]
+    
+    subgraph SchedulerLoop["Batch Scheduler Engine (src/scheduler.py)"]
+        Worker["Worker Loop"] --> CheckPolicy{"Active Policy"}
+        CheckPolicy -->|none| B1["Target = 1"]
+        CheckPolicy -->|fixed| B2["Target = fixed_size"]
+        CheckPolicy -->|adaptive| B3["Target = f(queue_size)"]
+        B1 --> Drain["Greedy Queue Drain & Timeout Loop"]
+        B2 --> Drain
+        B3 --> Drain
+    end
+    
+    Queue --> Worker
+    Drain -->|Assembled Batch| Exec["Inference Worker (src/model.py)"]
+    
+    subgraph CUDAEngine["Execution Backend"]
+        Exec --> Stack["Host Tensor Stack & PCIe Transfer"]
+        Stack --> Forward["ResNet-18 Forward Pass (CUDA Event Timed)"]
+        Forward --> D2H["Result Argmax & D2H Transfer"]
+    end
+    
+    D2H -->|Predictions + Timings| Resolve["Resolve Client Futures"]
+    Resolve -->|HTTP 200 JSON| Client
 ```
-Install matching **CUDA-enabled torch and torchvision** using the Windows/Pip/CUDA selector at https://pytorch.org/get-started/locally/ (use the same versions on both machines). Example only, if the PyTorch selector currently recommends cu128:
 
-```powershell
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+---
+
+## 4. Repository Structure
+
+```text
+dynamic-batching-image-inference-server/
+├── README.md                           # Comprehensive project documentation
+├── pyproject.toml                      # Project build metadata and dependencies
+├── requirements.txt                    # Pinned Python package dependencies
+├── configs/
+│   └── example.yaml                    # Non-machine-specific example server configuration
+├── src/
+│   ├── __init__.py
+│   ├── app.py                          # FastAPI service, endpoints, and lifespan management
+│   ├── model.py                        # ResNet-18 model wrapper, transform, and CUDA timing
+│   └── scheduler.py                    # Async queue manager and batch aggregation engine
+├── tests/
+│   ├── test_api.py                     # API endpoint correctness tests
+│   ├── test_model.py                   # Model initialization and inference tests
+│   └── test_scheduler.py               # Batch scheduling policy and backlog tests
+├── benchmarks/
+│   ├── README.md                       # Benchmark execution and metric documentation
+│   ├── make_test_image.py              # Synthetic JPEG generator
+│   ├── benchmark.py                    # Concurrency-controlled asynchronous client
+│   ├── run_matrix.py                   # Concurrency sweep automation runner
+│   ├── monitor_gpu.py                  # Background NVIDIA-SMI telemetry logger
+│   ├── system_info.py                  # Hardware, driver, and CUDA diagnostic collector
+│   └── analyze.py                      # Result aggregation and chart generator
+├── docs/
+│   ├── architecture.md                 # Detailed architectural and concurrency specification
+│   ├── methodology.md                  # Measurement boundaries and benchmarking protocol
+│   ├── limitations.md                  # Known caveats, constraints, and future work
+│   ├── DLAC Project Abstract.docx      # Academic course abstract
+│   └── experiment_log_template.csv     # Manual laboratory notebook template
+└── results/
+    ├── README.md                       # Output reproduction instructions
+    └── .gitkeep
 ```
 
-Then:
+---
+
+## 5. Requirements and Setup
+
+### Prerequisites
+- **Operating System**: Windows 10/11 or Linux
+- **Python**: Version 3.11 recommended
+- **Hardware**: NVIDIA GPU with CUDA driver support (or CPU for testing)
+
+### Installation
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/SujitVakkalanka1/DLAC-Project-.git
+   cd DLAC-Project-
+   ```
+
+2. **Create and activate a virtual environment**:
+   ```powershell
+   py -3.11 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install --upgrade pip
+   ```
+
+3. **Install PyTorch with CUDA support**:
+   Select the appropriate CUDA build matching your local NVIDIA driver (e.g., CUDA 12.8):
+   ```powershell
+   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+   ```
+
+4. **Install project dependencies**:
+   ```powershell
+   pip install -r requirements.txt
+   ```
+
+5. **Verify GPU detection and generate synthetic test image**:
+   ```powershell
+   python -c "import torch; print('CUDA Available:', torch.cuda.is_available(), '| GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+   python benchmarks/make_test_image.py
+   python benchmarks/system_info.py
+   ```
+
+---
+
+## 6. Running the Server
+
+The server can be configured via environment variables or a YAML configuration file (`configs/example.yaml`).
+
+### Running with Environment Variables
 ```powershell
-pip install -r requirements.txt
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO GPU')"
-python make_test_image.py
-python system_info.py
+$env:BATCH_MODE="adaptive"       # none, fixed, or adaptive
+$env:FIXED_BATCH_SIZE="8"        # Target size for fixed mode
+$env:MAX_BATCH_SIZE="16"         # Max batch capacity
+$env:MAX_WAIT_MS="20"            # Batch accumulation delay in ms
+uvicorn src.app:app --host 127.0.0.1 --port 8000 --workers 1
 ```
-If CUDA is False, stop and fix the driver/PyTorch installation. The synthetic image is only for performance testing; its predicted label is not meaningful.
 
-## 3. Run a single mode (3 PowerShell terminals)
-**Terminal A** — activate the venv, start the server:
+### Running with YAML Configuration
 ```powershell
-.\.venv\Scripts\Activate.ps1
-$env:BATCH_MODE='none'
-$env:FIXED_BATCH_SIZE='8'
-$env:MAX_BATCH_SIZE='16'
-$env:MAX_WAIT_MS='20'
-uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
+$env:CONFIG_PATH="configs/example.yaml"
+uvicorn src.app:app --host 127.0.0.1 --port 8000 --workers 1
 ```
-Wait for startup. First launch downloads ResNet-18 weights. Test http://127.0.0.1:8000/docs or `/health`.
 
-**Terminal B** — activate venv, start GPU monitor:
+---
+
+## 7. Running Automated Tests
+
+Run the complete regression and correctness test suite:
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python monitor_gpu.py --out results/4060_none_gpu.csv
+python -m unittest discover tests
 ```
-Replace `4060` with `5060` on the other laptop, and `none` with the actual mode.
 
-**Terminal C** — activate venv, run benchmark matrix:
-```powershell
-.\.venv\Scripts\Activate.ps1
-python run_matrix.py --system 4060 --repeats 3 --requests 300
+The test suite covers:
+- **`tests/test_scheduler.py`**: Verifies that `none` mode maintains batch size 1, `fixed` mode aggregates requests to `fixed_size`, `adaptive` mode scales with queue depth, backlogs are greedily drained, timeouts dispatch partial batches, and server shutdown is clean.
+- **`tests/test_model.py`**: Validates model initialization, transforms, preprocessing shape `(3, 224, 224)`, and batched forward pass output structures.
+- **`tests/test_api.py`**: Tests FastAPI health and stats endpoints, image classification with valid inputs, invalid image rejection (`400`), and oversized file handling (`413`).
+
+---
+
+## 8. API Usage & Example Endpoints
+
+### `GET /health`
+Returns the operational health and currently active batching policy.
+```bash
+curl http://127.0.0.1:8000/health
 ```
-On the other laptop use `--system 5060`. Tests concurrency 1, 4, 16, 32 with three repetitions. Save results. Stop Terminal B with Ctrl+C after all tests.
-
-## 4. Repeat for fixed and adaptive
-Stop Terminal A with Ctrl+C, change `$env:BATCH_MODE='fixed'`, restart server, and repeat Terminal B/C with new GPU log filename. Repeat again for `$env:BATCH_MODE='adaptive'`. **Always restart the server between modes.** The `run_matrix.py` script automatically reads the active mode and names the result files.
-
-## 5. Compare laptops
-Copy all files from the `results` folders into one folder on one machine, **without overwriting**. Then run:
-```powershell
-python analyze.py
+**Response**:
+```json
+{
+  "status": "ok",
+  "mode": "adaptive",
+  "device": "cuda:0"
+}
 ```
-Outputs `results/comparison_summary.csv`, `results/comparison_throughput.png`, `results/comparison_p95.png`.
 
-## 6. Record manually for each laptop
-- Exact GPU name, total VRAM, GPU power limit (TGP), driver version, CUDA runtime, torch/torchvision versions
-- CPU model, RAM, OS, laptop model, cooling/performance mode, plugged-in state
-- NVIDIA-SMI power draw, temperature, GPU utilization, VRAM use and SM clock during testing
-- Batch mode, batch size cap, max wait (ms), request count, concurrency, number of repetitions
-- Successful requests/sec, mean/p50/p95/p99 latency, errors, average queue wait and observed batch sizes
-- Any throttling, background load, or failed runs
+### `GET /stats`
+Returns live scheduler telemetry and batch size distribution histogram.
+```bash
+curl http://127.0.0.1:8000/stats
+```
+**Response**:
+```json
+{
+  "mode": "adaptive",
+  "processed": 128,
+  "batches": 16,
+  "batch_histogram": { "8": 16 },
+  "queued": 0
+}
+```
 
-`system_info.py` records much of this automatically; supplement the missing hardware/power information manually. Use **identical image bytes, software versions, parameters, and test protocol** on both systems. Warm-up is excluded from timing. Do not run the GPU monitor too aggressively: 1-second polling is sufficient.
+### `POST /predict`
+Upload an image via multipart/form-data for classification.
+```bash
+curl -X POST -F "file=@test_images/synthetic.jpg" http://127.0.0.1:8000/predict
+```
+**Response**:
+```json
+{
+  "class_id": 107,
+  "label": "jellyfish",
+  "batch_size": 8,
+  "queue_ms": 2.145,
+  "gpu_batch_ms": 5.482,
+  "server_batch_ms": 7.120
+}
+```
 
-## 7. Scientific limitations and caveats
-- This benchmark uses **closed-loop concurrency** (each worker sends a new request after its previous one finishes), not a controlled open-loop arrival rate. To support claims about bursty/Poisson traffic, add an arrival-rate-controlled workload generator.
-- The adaptive scheduler uses a **simple queue-length heuristic**, not a novel latency-aware scheduler. No novelty claim is justified without related-work analysis and stronger baselines (e.g., NVIDIA Triton).
-- GPU batch time reported by the server is wall-clock for forward pass and result transfer; `torch.cuda.synchronize()` or CUDA events are needed for isolated kernel timing. This code's CPU transfer synchronizes before results return.
-- ResNet-18 may be too lightweight to saturate either GPU; include a larger model in future experiments if needed.
-- Queue wait is measured from submission into scheduler, and excludes image upload/preprocessing; client latency includes network/upload/preprocessing/queue/inference.
-- Run repeated trials and report variability, not just the best result. Laptop power limits and thermals can dominate inter-GPU comparisons.
-- This starter processes batches sequentially with a single GPU worker; do not launch multiple server workers.
-- `MAX_BATCH_SIZE` should remain >= 8 for the supplied adaptive heuristic. Max queue is 512; overload may cause HTTP 503.
+---
 
-Use `experiment_log_template.csv` as a manual experiment notebook. Each row should describe one run. When combining the two laptops' results, rename the two `system_info.json` files to `4060_system_info.json` and `5060_system_info.json` before copying so neither is overwritten.
+## 9. Benchmarking Workflow
+
+For multi-terminal benchmarking:
+
+1. **Terminal 1**: Start the server with the target mode (e.g. `fixed` or `adaptive`).
+2. **Terminal 2**: Start background GPU telemetry logging:
+   ```powershell
+   python benchmarks/monitor_gpu.py --out results/4060_adaptive_gpu.csv
+   ```
+3. **Terminal 3**: Execute the automated concurrency sweep across levels 1, 4, 16, 32:
+   ```powershell
+   python benchmarks/run_matrix.py --system 4060 --repeats 3 --requests 300
+   ```
+4. **Aggregate Results and Generate Charts**:
+   ```powershell
+   python benchmarks/analyze.py
+   ```
+   Outputs will be stored in `results/comparison_summary.csv`, `results/comparison_throughput_mean.png`, and `results/comparison_p95_latency_mean.png`.
+
+---
+
+## 10. Limitations & Known Issues
+
+- **Closed-Loop Concurrency**: Benchmark clients issue requests as preceding ones finish. Real production traffic is open-loop (e.g., Poisson arrivals), which can generate heavier tail queuing.
+- **Model Size**: ResNet-18 has a very low inference latency (~2.4 ms on RTX 4060). Consequently, system latency is dominated by HTTP/CPU framing rather than GPU kernel saturation.
+- **Laptop TGP Variability**: Comparing laptop GPUs across chassis involves uncontrolled thermal dissipation and OEM-configured power limits (TGP), which must be tracked via `system_info.py`.
+- **Synthetic Image Label**: The label produced from `test_images/synthetic.jpg` is an artifact of random noise passing through ImageNet weights and does not reflect model accuracy.
+
+See [docs/limitations.md](docs/limitations.md) and [docs/methodology.md](docs/methodology.md) for detailed scientific discussions.
